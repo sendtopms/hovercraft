@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% File    : hovercraft_test.erl
+%%% File    : hovercraft.erl
 %%% Author  : J Chris Anderson <jchris@couch.io>
 %%% Description : Erlang CouchDB access.
 %%%
@@ -11,7 +11,7 @@
 
 %% see README.md for usage information
 
--export([all/0, all/1, chain/0, lightning/0, lightning/1]).
+-export([all/0, all/1, lightning/0, lightning/1]).
 
 -include("src/couchdb/couch_db.hrl").
 
@@ -31,11 +31,12 @@ all(DbName) ->
     should_link_to_db_server(DbName),
     should_get_db_info(DbName),
     should_save_and_open_doc(DbName),
-%% FIXME    should_stream_attachment(DbName),
+    should_stream_attachment(DbName),
     should_query_views(DbName),
     should_error_on_missing_doc(DbName),
     should_save_bulk_docs(DbName),
     should_save_bulk_and_open_with_db(DbName),
+    chain(),
     ok.
 
 chain() ->
@@ -148,21 +149,19 @@ should_query_views(DbName) ->
 
 should_query_map_view(DbName, DDocName) ->
     % use the default query arguments and row collector function
-    {ok, ViewResp} =
+    {ok, {RowCount, Offset, Rows}} =
         hovercraft:query_view(DbName, DDocName, <<"basic">>),
-    {RowCount, Offset, Rows} = ViewResp,
-    % ?LOG_INFO("{RowCount, Offset, Rows} ~p", [{RowCount, Offset, Rows}]),
-    
-    % assert rows is the right length
-    20 = length(Rows),
-    RowCount = length(Rows),
-    0 = Offset,
+    % assert correct lengths
+    20 = RowCount,
+    20 = Offset,
     % assert we got every row
     lists:foldl(fun({{RKey, RDocId}, RValue}, _) ->
-            1 = RValue,
-            {ok, {DocProps}} = hovercraft:open_doc(RDocId),
-            RKey = proplists:get_value(<<"_rev">>, DocProps)
-        end, Rows, []).
+                    1 = RValue,
+                    {ok, {DocProps}} = hovercraft:open_doc(RDocId),
+                    RKey = proplists:get_value(<<"_rev">>, DocProps)
+                end,
+                Rows,
+                []).
 
 should_query_reduce_view(DbName, DDocName) ->
     {ok, [Result]} =
@@ -172,8 +171,7 @@ should_query_reduce_view(DbName, DDocName) ->
         hovercraft:query_view(DbName, DDocName, <<"reduce-sum">>, #view_query_args{
             group_level = exact
         }),
-    ?LOG_INFO("Results ~p", [Results]),
-    20 = length(Results).
+    [{_,20}] = Results.
 
 
 %%--------------------------------------------------------------------
@@ -265,4 +263,3 @@ make_docs_list({DocProps}, Size, Docs, Id) ->
 
 make_id_str(Num) ->
     ?l2b(lists:flatten(io_lib:format("~10..0B", [Num]))).
-

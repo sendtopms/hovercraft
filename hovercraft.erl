@@ -163,14 +163,12 @@ query_view(DbName, DesignName, ViewName, #view_query_args{}=QueryArgs) ->
     % provide a default row collector fun
     % don't use this on big data it will balloon in memory
     RowCollectorFun = fun(Row, Acc) ->
-        % ?LOG_INFO("Row ~p", [Row]),
         {ok, [Row | Acc]}
     end,
     query_view(DbName, DesignName, ViewName, RowCollectorFun, QueryArgs);
 
 query_view(DbName, DesignName, ViewName, ViewFoldFun) ->
     query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{}).
-
 
 query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{
             limit = Limit,
@@ -182,7 +180,7 @@ query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{
             start_docid = StartDocId,
             end_key = EndKey,
             end_docid = EndDocId
-        }=QueryArgs) ->
+          }=QueryArgs) ->
     {ok, Db} = open_db(DbName),
     % get view reference
     DesignId = <<"_design/", DesignName/binary>>,
@@ -190,7 +188,6 @@ query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{
         {ok, View, Group} ->
             {ok, RowCount} = couch_view:get_row_count(View),
             Start = {StartKey, StartDocId},
-            End = {EndKey, EndDocId},
             FoldlFun = couch_httpd_view:make_view_fold_fun(nil,
                 QueryArgs, <<"">>, Db, RowCount,
                 #view_fold_helper_funs{
@@ -199,8 +196,8 @@ query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{
                     send_row = make_map_row_fold_fun(ViewFoldFun)
                 }),
             FoldAccInit = {Limit, SkipCount, undefined, []},
-	        Options = [{dir, Dir}, {start_key, Start}],
-            {ok, {_, [{_, _}]} , {_, _, _, {Offset, ViewFoldAcc}}} =
+            Options = [{dir, Dir}, {start_key, Start}],
+            {ok, {_, [{Offset, _}]} , ViewFoldAcc} =
                 couch_view:fold(View, FoldlFun, FoldAccInit, Options),
             {ok, {RowCount, Offset, ViewFoldAcc}};
         {not_found, Reason} ->
@@ -214,11 +211,8 @@ query_view(DbName, DesignName, ViewName, ViewFoldFun, #view_query_args{
                                 send_row = make_reduce_row_fold_fun(ViewFoldFun)
                             }),
                     FoldAccInit = {Limit, SkipCount, undefined, []},
-                    {ok, {_, _, _, AccResult}} = couch_view:fold_reduce(View, RespFun, FoldAccInit,
-                        [{key_group_fun, GroupRowsFun}, {dir, Dir}, 
-                            {start_key, {StartKey, StartDocId}}
-                            % {end_key, {EndKey, EndDocId}}
-                            ]),
+                    {ok, {_, _, _, AccResult}} = couch_view:fold_reduce(View, RespFun, FoldAccInit, [{key_group_fun, GroupRowsFun}|
+                           couch_httpd_view:make_key_options(QueryArgs#view_query_args{start_key=StartKey, end_key=EndKey})]),
                     {ok, AccResult};
                 _ ->
                     throw({not_found, Reason})
@@ -262,28 +256,32 @@ attachment_streamer(DbName, DocId, AName) ->
     {ok, Db} = open_db(DbName),
     case couch_db:open_doc(Db, DocId, []) of
     {ok, #doc{atts=Attachments}=Doc} ->
-        case proplists:get_value(AName, Attachments) of
-        undefined ->
-            throw({not_found, "Document is missing attachment"});
-        {_Type, BinPointer} ->
-            Me = self(),
-            couch_doc:bin_foldl(BinPointer,
-                fun(Bins, []) ->
-                    BinSegment = list_to_binary(Bins),
-                    receive
-                        {next_attachment_bytes, From} ->
-                            From ! {attachment_bytes, Me, {BinSegment, size(BinSegment)}}
-                    end,
-                    {ok, []}
+      % reduce the list to a new list with a single element, which
+      % is a CouchDB '#att' record that has a matching name.
+      AttsFiltered = [Att || Att <- Attachments, Att#att.name == AName],
+
+      case AttsFiltered of
+      [] ->
+        throw({not_found, "Document is missing attachment"});
+      _Else ->
+        Att = hd(AttsFiltered),
+        Me = self(),
+        couch_doc:att_foldl(Att,
+            fun(Bins, []) ->
+                BinSegment = list_to_binary(Bins),
+                receive
+                    {next_attachment_bytes, From} ->
+                        From ! {attachment_bytes, Me, {BinSegment, size(BinSegment)}}
                 end,
-                []
-            ),
-            receive
-                {next_attachment_bytes, From} ->
-                    From ! {attachment_done, Me}
-            end
-        end;
+                {ok, []}
+            end,
+            []
+        ),
+        receive
+            {next_attachment_bytes, From} ->
+                From ! {attachment_done, Me}
+        end
+      end;
     _Else ->
         throw({not_found, "Document not found"})
     end.
-
